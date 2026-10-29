@@ -12,24 +12,39 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/cliffkoome/typeghast/internal/feed"
+	"github.com/cliffkoome/typeghast/internal/models"
 	"github.com/cliffkoome/typeghast/internal/narrator"
 	"github.com/cliffkoome/typeghast/internal/session"
 )
 
+type Mode int
+
+const (
+	// Haunted fills the screen with ghosts as the agent's context grows.
+	Haunted Mode = iota
+	// Normal is a plain typing game over trending developer headlines.
+	Normal
+)
+
 type Config struct {
-	// Threshold is the context size, in tokens, at which the haunting peaks.
+	Mode Mode
+	// Threshold, if set, is the context size in tokens at which the haunting
+	// peaks. Otherwise it is HauntAt times the model's context window.
 	Threshold int
+	HauntAt   float64
 	// MaxGhosts is how many ghosts are on screen at the threshold.
 	MaxGhosts int
-	// Tracker supplies the agent's context usage. Nil means demo mode, where
-	// the player sets the context with pgup/pgdn.
+	// Tracker supplies the agent's context usage. In haunted mode, nil means
+	// demo mode, where the player sets the context with pgup/pgdn.
 	Tracker *session.Tracker
-	// Narrator turns the agent's actions into sentences to type. Without one,
-	// commands and edits are typed as short plain lines.
-	Narrator *narrator.Narrator
 	// Initial is the tracker's first snapshot, which holds the session's
 	// history so far.
-	Initial session.Snapshot
+	Initial  session.Snapshot
+	Narrator narrator.Narrator
+	Catalog  models.Catalog
+	// News is what normal mode types.
+	News []feed.Item
 	// Notice is shown under the meter, e.g. why we fell back to demo mode.
 	Notice string
 }
@@ -40,13 +55,30 @@ const (
 	footerRows = 2
 	textMargin = 4
 	textLines  = 4
+	demoWindow = 1_000_000
+	agentLabel = "what your agent just did"
 )
 
-type tickMsg time.Time
-type pollMsg session.Snapshot
+// Messages carry the game that scheduled them, so a game left via the menu
+// can't feed its timers into the next one.
+type tickMsg struct {
+	m *Model
+	t time.Time
+}
+type pollMsg struct {
+	m    *Model
+	snap session.Snapshot
+}
 type narrationMsg struct {
+	m     *Model
 	lines []string
 	err   error
+}
+
+// sentence is a line queued for typing, with the label shown while it is
+// being typed.
+type sentence struct {
+	text, label string
 }
 
 type Model struct {
@@ -58,12 +90,12 @@ type Model struct {
 
 	words []string
 	typed [][]rune
-	cur   int
-	// fromAgent marks words that came from the agent's actions rather than
-	// the filler pool.
-	fromAgent []bool
-	// queue holds agent sentences not yet added to the word stream.
-	queue []string
+	label []string // per word
+	// breaks marks words that start a new sentence, which starts a new line.
+	breaks []bool
+	cur    int
+	queue  []sentence
+	news   int // next index into cfg.News
 
 	pending     []session.Event
 	narrating   bool
@@ -76,8 +108,10 @@ type Model struct {
 	cursorY   float64
 
 	ctxTokens int
+	window    int
 	modelName string
 	sessionID string
+	updated   time.Time
 
 	exorcisedAt time.Time
 
@@ -90,47 +124,72 @@ type Model struct {
 }
 
 func New(cfg Config) *Model {
-	m := &Model{cfg: cfg, rng: rand.New(rand.NewSource(time.Now().UnixNano()))}
-	m.reset()
-	if cfg.Tracker == nil {
-		m.ctxTokens = cfg.Threshold / 4
-	} else {
-		m.ctxTokens = cfg.Initial.ContextTokens
-		m.modelName, m.sessionID = cfg.Initial.Model, cfg.Initial.SessionID
-		m.addEvents(cfg.Initial.Events)
+	if cfg.HauntAt <= 0 {
+		cfg.HauntAt = 0.4
 	}
+	if cfg.Narrator == nil {
+		cfg.Narrator = narrator.AgentWords{}
+	}
+	m := &Model{cfg: cfg, rng: rand.New(rand.NewSource(time.Now().UnixNano())), window: demoWindow}
+	switch {
+	case cfg.Mode == Normal:
+	case cfg.Tracker == nil:
+		m.ctxTokens = m.threshold() / 4
+	default:
+		m.apply(cfg.Initial)
+	}
+	m.reset()
 	return m
 }
 
 func (m *Model) reset() {
-	m.words, m.typed, m.fromAgent = nil, nil, nil
+	m.words, m.typed, m.label, m.breaks = nil, nil, nil, nil
 	m.cur = 0
-	m.refill()
 	m.started = time.Time{}
 	m.correctChrs, m.keystrokes, m.correctKeys = 0, 0, 0
 	m.score = 0
+	m.refill()
 }
 
+func (m *Model) haunted() bool { return m.cfg.Mode == Haunted }
+
 func (m *Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{tick(), m.maybeNarrate()}
-	if m.cfg.Tracker != nil {
+	cmds := []tea.Cmd{m.tick(), m.maybeNarrate()}
+	if m.haunted() && m.cfg.Tracker != nil {
 		cmds = append(cmds, m.poll(time.Second))
 	}
 	return tea.Batch(cmds...)
 }
 
-func tick() tea.Cmd {
-	return tea.Tick(time.Second/fps, func(t time.Time) tea.Msg { return tickMsg(t) })
+func (m *Model) tick() tea.Cmd {
+	return tea.Tick(time.Second/fps, func(t time.Time) tea.Msg { return tickMsg{m, t} })
 }
 
 func (m *Model) poll(after time.Duration) tea.Cmd {
 	t := m.cfg.Tracker
-	return tea.Tick(after, func(time.Time) tea.Msg { return pollMsg(t.Poll()) })
+	return tea.Tick(after, func(time.Time) tea.Msg { return pollMsg{m, t.Poll()} })
+}
+
+func (m *Model) apply(snap session.Snapshot) {
+	m.setContext(snap.ContextTokens)
+	m.modelName, m.sessionID, m.updated = snap.Model, snap.SessionID, snap.Updated
+	m.window = m.cfg.Catalog.Window(snap.Model, snap.ContextTokens)
+	m.addEvents(snap.Events)
+}
+
+func (m *Model) threshold() int {
+	if m.cfg.Threshold > 0 {
+		return m.cfg.Threshold
+	}
+	return int(float64(m.window) * m.cfg.HauntAt)
 }
 
 // ratio is how far the context is toward the haunting threshold.
 func (m *Model) ratio() float64 {
-	return math.Min(float64(m.ctxTokens)/float64(m.cfg.Threshold), 1.25)
+	if !m.haunted() {
+		return 0
+	}
+	return math.Min(float64(m.ctxTokens)/float64(m.threshold()), 1.25)
 }
 
 func (m *Model) targetGhosts() int {
@@ -169,29 +228,37 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
-		m.pw, m.ph = m.w, max(m.h-headerRows-footerRows, textLines*2+1)
+		m.pw, m.ph = m.w, max(m.h-headerRows-footerRows, textLines*2+3)
 		return m, nil
 
 	case tickMsg:
-		now := time.Time(msg)
+		if msg.m != m {
+			return m, nil
+		}
+		now := msg.t
 		dt := 1.0 / fps
 		if !m.lastTick.IsZero() {
 			dt = math.Min(now.Sub(m.lastTick).Seconds(), 0.1)
 		}
 		m.lastTick = now
 		m.stepGhosts(now, dt)
-		return m, tick()
+		return m, m.tick()
 
 	case pollMsg:
-		snap := session.Snapshot(msg)
-		m.setContext(snap.ContextTokens)
-		m.modelName, m.sessionID = snap.Model, snap.SessionID
-		m.addEvents(snap.Events)
+		if msg.m != m {
+			return m, nil
+		}
+		m.apply(msg.snap)
 		return m, tea.Batch(m.poll(time.Second), m.maybeNarrate())
 
 	case narrationMsg:
+		if msg.m != m {
+			return m, nil
+		}
 		m.narrating, m.lastNarrate, m.narrErr = false, time.Now(), msg.err
-		m.enqueue(msg.lines...)
+		for _, l := range msg.lines {
+			m.enqueue(sentence{l, agentLabel})
+		}
 		return m, m.maybeNarrate()
 
 	case tea.KeyMsg:
@@ -201,22 +268,23 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) handleKey(k tea.KeyMsg) tea.Cmd {
+	demo := m.haunted() && m.cfg.Tracker == nil
 	switch k.Type {
 	case tea.KeyCtrlC, tea.KeyEsc:
 		return tea.Quit
 	case tea.KeyCtrlR:
 		m.reset()
 	case tea.KeyPgUp:
-		if m.cfg.Tracker == nil {
-			m.setContext(m.ctxTokens + m.cfg.Threshold/10)
+		if demo {
+			m.setContext(m.ctxTokens + m.threshold()/10)
 		}
 	case tea.KeyPgDown:
-		if m.cfg.Tracker == nil {
-			m.setContext(max(m.ctxTokens-m.cfg.Threshold/10, 0))
+		if demo {
+			m.setContext(max(m.ctxTokens-m.threshold()/10, 0))
 		}
 	case tea.KeyHome:
-		if m.cfg.Tracker == nil {
-			m.setContext(m.cfg.Threshold / 20)
+		if demo {
+			m.setContext(m.threshold() / 20)
 		}
 	case tea.KeyBackspace:
 		m.backspace()
@@ -259,82 +327,6 @@ func (m *Model) space() {
 	m.refill()
 }
 
-// lookahead is kept short so fresh agent sentences show up within a line.
-const lookahead = 30
-
-func (m *Model) refill() {
-	for len(m.words)-m.cur < lookahead {
-		words, agent := randomWords(m.rng, 10), false
-		if len(m.queue) > 0 {
-			words, agent = strings.Fields(m.queue[0]), true
-			m.queue = m.queue[1:]
-		}
-		for _, w := range words {
-			m.words = append(m.words, w)
-			m.typed = append(m.typed, nil)
-			m.fromAgent = append(m.fromAgent, agent)
-		}
-	}
-}
-
-const maxQueue = 12
-
-func (m *Model) enqueue(lines ...string) {
-	m.queue = append(m.queue, lines...)
-	// Stay current: if the agent outpaces the player, drop the oldest news.
-	if n := len(m.queue); n > maxQueue {
-		m.queue = m.queue[n-maxQueue:]
-	}
-}
-
-func (m *Model) addEvents(events []session.Event) {
-	if m.cfg.Narrator == nil {
-		for _, e := range events {
-			if l := plainLine(e); l != "" {
-				m.enqueue(l)
-			}
-		}
-		return
-	}
-	m.pending = append(m.pending, events...)
-	if n := len(m.pending); n > 30 {
-		m.pending = m.pending[n-30:]
-	}
-}
-
-// plainLine describes an event without a model: commands by their
-// description, file changes by file name.
-func plainLine(e session.Event) string {
-	switch e.Kind {
-	case "command":
-		return narrator.Clean(strings.TrimPrefix(e.Text, "ran a command: "))
-	case "edit", "write":
-		head, _, _ := strings.Cut(e.Text, ":")
-		return narrator.Clean(head)
-	}
-	return ""
-}
-
-// maybeNarrate sends recent actions to the model once enough have piled up,
-// or once some have waited a while.
-func (m *Model) maybeNarrate() tea.Cmd {
-	n := m.cfg.Narrator
-	if n == nil || m.narrating || len(m.pending) == 0 {
-		return nil
-	}
-	if len(m.pending) < 3 && time.Since(m.lastNarrate) < 20*time.Second {
-		return nil
-	}
-	events := m.pending[max(len(m.pending)-12, 0):]
-	m.pending, m.narrating = nil, true
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer cancel()
-		lines, err := n.Narrate(ctx, events)
-		return narrationMsg{lines, err}
-	}
-}
-
 func (m *Model) backspace() {
 	if n := len(m.typed[m.cur]); n > 0 {
 		m.typed[m.cur] = m.typed[m.cur][:n-1]
@@ -346,6 +338,91 @@ func (m *Model) backspace() {
 		if string(m.typed[m.cur]) == m.words[m.cur] {
 			m.correctChrs -= len(m.words[m.cur]) + 1
 		}
+	}
+}
+
+// lookahead is kept short so fresh agent sentences show up within a line.
+const lookahead = 30
+
+func (m *Model) refill() {
+	for len(m.words)-m.cur < lookahead {
+		s := m.next()
+		// Filler runs on without breaks; real sentences get their own line.
+		prev := ""
+		if n := len(m.label); n > 0 {
+			prev = m.label[n-1]
+		}
+		for i, w := range strings.Fields(s.text) {
+			m.words = append(m.words, w)
+			m.typed = append(m.typed, nil)
+			m.label = append(m.label, s.label)
+			m.breaks = append(m.breaks, i == 0 && (s.label != "" || prev != ""))
+		}
+	}
+}
+
+// next picks the upcoming sentence: queued agent news first in haunted
+// mode, headlines in normal mode, and filler words when there's nothing else.
+func (m *Model) next() sentence {
+	if len(m.queue) > 0 {
+		s := m.queue[0]
+		m.queue = m.queue[1:]
+		return s
+	}
+	if !m.haunted() {
+		news := m.cfg.News
+		if len(news) == 0 {
+			news = feed.Builtin()
+		}
+		it := news[m.news%len(news)]
+		m.news++
+		label := it.Source
+		if it.URL != "" {
+			label += " · " + it.URL
+		}
+		return sentence{it.Text, label}
+	}
+	return sentence{strings.Join(randomWords(m.rng, 10), " "), ""}
+}
+
+const maxQueue = 12
+
+func (m *Model) enqueue(s sentence) {
+	m.queue = append(m.queue, s)
+	// Stay current: if the agent outpaces the player, drop the oldest news.
+	if n := len(m.queue); n > maxQueue {
+		m.queue = m.queue[n-maxQueue:]
+	}
+}
+
+func (m *Model) addEvents(events []session.Event) {
+	m.pending = append(m.pending, events...)
+	if n := len(m.pending); n > 30 {
+		m.pending = m.pending[n-30:]
+	}
+}
+
+// maybeNarrate turns pending actions into sentences. A model narrator waits
+// until a few actions pile up, or until one has waited a while.
+func (m *Model) maybeNarrate() tea.Cmd {
+	n := m.cfg.Narrator
+	if !m.haunted() || m.narrating || len(m.pending) == 0 {
+		return nil
+	}
+	if n.Batches() && len(m.pending) < 3 && time.Since(m.lastNarrate) < 20*time.Second {
+		return nil
+	}
+	keep := 12
+	if !n.Batches() {
+		keep = 6
+	}
+	events := m.pending[max(len(m.pending)-keep, 0):]
+	m.pending, m.narrating = nil, true
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		lines, err := n.Narrate(ctx, events)
+		return narrationMsg{m, lines, err}
 	}
 }
 
@@ -410,7 +487,7 @@ func (m *Model) drawText(c *canvas) {
 	x, curLine := 0, 0
 	for i, w := range m.words {
 		n := max(len([]rune(w)), len(m.typed[i]))
-		if x > 0 && x+n > maxW {
+		if x > 0 && (x+n > maxW || m.breaks[i]) {
 			lines = append(lines, line)
 			line, x = nil, 0
 		}
@@ -427,9 +504,11 @@ func (m *Model) drawText(c *canvas) {
 
 	first := max(curLine-1, 0)
 	top := (m.ph - (textLines*2 - 1)) / 2
-	if m.fromAgent[m.cur] {
-		for i, r := range []rune("what your agent just did") {
-			c.put(textMargin+i, top-2, r, stLabel)
+	if l := m.label[m.cur]; l != "" {
+		for i, r := range []rune(l) {
+			if i < maxW {
+				c.put(textMargin+i, top-2, r, stLabel)
+			}
 		}
 	}
 	for li := 0; li < textLines && first+li < len(lines); li++ {
@@ -487,13 +566,19 @@ func (m *Model) header() string {
 	if m.keystrokes > 0 {
 		acc = float64(m.correctKeys) / float64(m.keystrokes) * 100
 	}
-	stats := statStyle.Render(fmt.Sprintf("wpm %3.0f   acc %3.0f%%   score %6.0f   ×%.1f",
-		wpm, acc, m.score, m.multiplier()))
+	stats := fmt.Sprintf("wpm %3.0f   acc %3.0f%%", wpm, acc)
+	if m.haunted() {
+		stats += fmt.Sprintf("   score %6.0f   ×%.1f", m.score, m.multiplier())
+	}
+	stats = statStyle.Render(stats)
 	title := titleStyle.Render("typeghast")
 	gap := max(m.w-lipgloss.Width(title)-lipgloss.Width(stats)-2, 1)
 	row1 := " " + title + strings.Repeat(" ", gap) + stats
 
-	row2 := " " + m.meter()
+	row2 := " " + dimStyle.Render("normal mode · trending on DEV, Lobsters and Hacker News")
+	if m.haunted() {
+		row2 = " " + m.meter()
+	}
 
 	row3 := ""
 	switch {
@@ -525,22 +610,25 @@ func (m *Model) meter() string {
 		if m.sessionID != "" {
 			src += " · session " + m.sessionID[:min(8, len(m.sessionID))]
 		}
+		if idle := time.Since(m.updated); !m.updated.IsZero() && idle > 2*time.Minute {
+			src += " · idle " + idle.Round(time.Minute).String()
+		}
 	}
 	return fmt.Sprintf("%s %s %s  %s",
 		statStyle.Render("context"), bar,
-		statStyle.Render(fmt.Sprintf("%s / %s", kTokens(m.ctxTokens), kTokens(m.cfg.Threshold))),
+		statStyle.Render(fmt.Sprintf("%s · haunting peaks at %s of %s", kTokens(m.ctxTokens), kTokens(m.threshold()), kTokens(m.window))),
 		dimStyle.Render(src))
 }
 
 func (m *Model) footer() string {
 	help := "esc quit · ctrl+r restart"
-	if m.cfg.Tracker == nil {
+	if m.haunted() && m.cfg.Tracker == nil {
 		help += " · pgup/pgdn context · home compact"
 	}
-	if n := m.cfg.Narrator; n != nil {
-		status := "narrator " + n.Model
+	if m.haunted() && m.cfg.Tracker != nil {
+		status := "narrator: " + m.cfg.Narrator.Name()
 		switch {
-		case m.narrating:
+		case m.narrating && m.cfg.Narrator.Batches():
 			status += " · summarising your agent…"
 		case m.narrErr != nil:
 			status += " · " + m.narrErr.Error()
@@ -552,7 +640,7 @@ func (m *Model) footer() string {
 
 func kTokens(n int) string {
 	if n >= 1_000_000 {
-		return fmt.Sprintf("%.2fM", float64(n)/1_000_000)
+		return strings.TrimSuffix(fmt.Sprintf("%.2f", float64(n)/1_000_000), ".00") + "M"
 	}
 	return fmt.Sprintf("%dk", n/1000)
 }

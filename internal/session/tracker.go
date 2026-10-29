@@ -1,5 +1,5 @@
-// Package session reads a Claude Code session transcript and reports how full
-// the agent's context window is.
+// Package session reads a coding agent's session transcript and reports how
+// full its context window is and what it has been doing.
 package session
 
 import (
@@ -17,6 +17,9 @@ type Snapshot struct {
 	SessionID     string
 	Model         string
 	ContextTokens int
+	// Updated is when the transcript was last written, to tell a working
+	// agent from an idle or finished one.
+	Updated time.Time
 	// Events are the actions read by this poll only, oldest first.
 	Events []Event
 }
@@ -28,24 +31,25 @@ type Event struct {
 	Text string
 }
 
-// Tracker tails a transcript file. With no fixed path it follows whichever
-// transcript under ~/.claude/projects was written most recently, so it moves
-// to the new file when the user runs /clear or starts another session.
+// Tracker tails one session's transcript. When follow is set it also moves to
+// a newer transcript in the same project directory, which is what Claude Code
+// creates on /clear.
 type Tracker struct {
-	fixed string
-	path  string
-	off   int64
-	snap  Snapshot
-	seen  map[string]bool
+	path   string
+	follow bool
+	off    int64
+	snap   Snapshot
+	seen   map[string]bool
 }
 
-func NewTracker(path string) *Tracker {
-	return &Tracker{fixed: path}
+func NewTracker(path string, follow bool) *Tracker {
+	return &Tracker{path: path, follow: follow, snap: Snapshot{Path: path}, seen: map[string]bool{}}
 }
 
 type entry struct {
 	IsSidechain bool   `json:"isSidechain"`
 	SessionID   string `json:"sessionId"`
+	Cwd         string `json:"cwd"`
 	Message     *struct {
 		Role    string          `json:"role"`
 		Model   string          `json:"model"`
@@ -60,26 +64,24 @@ type entry struct {
 }
 
 // Poll reads any entries appended since the last call and returns the
-// current snapshot. A zero Path means no transcript was found.
+// current snapshot.
 func (t *Tracker) Poll() Snapshot {
-	path := t.fixed
-	if path == "" {
-		path = latestTranscript()
-	}
-	if path == "" {
-		return Snapshot{}
-	}
-	if path != t.path {
-		t.path, t.off = path, 0
-		t.snap = Snapshot{Path: path}
-		t.seen = map[string]bool{}
+	if t.follow {
+		if newer := newestIn(filepath.Dir(t.path)); newer != "" && newer != t.path && modTime(newer).After(modTime(t.path)) {
+			t.path, t.off = newer, 0
+			t.snap = Snapshot{Path: newer}
+			t.seen = map[string]bool{}
+		}
 	}
 
-	f, err := os.Open(path)
+	f, err := os.Open(t.path)
 	if err != nil {
 		return t.snap
 	}
 	defer f.Close()
+	if info, err := f.Stat(); err == nil {
+		t.snap.Updated = info.ModTime()
+	}
 	if _, err := f.Seek(t.off, io.SeekStart); err != nil {
 		return t.snap
 	}
@@ -116,21 +118,21 @@ func (t *Tracker) Poll() Snapshot {
 	return t.snap
 }
 
-func latestTranscript() string {
-	home, err := os.UserHomeDir()
+func modTime(path string) time.Time {
+	info, err := os.Stat(path)
 	if err != nil {
-		return ""
+		return time.Time{}
 	}
-	matches, _ := filepath.Glob(filepath.Join(home, ".claude", "projects", "*", "*.jsonl"))
+	return info.ModTime()
+}
+
+func newestIn(dir string) string {
+	matches, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))
 	var best string
 	var bestMod time.Time
 	for _, m := range matches {
-		info, err := os.Stat(m)
-		if err != nil {
-			continue
-		}
-		if info.ModTime().After(bestMod) {
-			best, bestMod = m, info.ModTime()
+		if mt := modTime(m); mt.After(bestMod) {
+			best, bestMod = m, mt
 		}
 	}
 	return best

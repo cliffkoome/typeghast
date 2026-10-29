@@ -18,7 +18,7 @@ func TestPollFollowsAppendsAndSkipsSidechains(t *testing.T) {
 	}
 
 	write(`{"sessionId":"abc","message":{"model":"m1","usage":{"input_tokens":10,"cache_read_input_tokens":1000,"cache_creation_input_tokens":100,"output_tokens":5}}}`+"\n", os.O_CREATE|os.O_TRUNC)
-	tr := NewTracker(path)
+	tr := NewTracker(path, false)
 	if got := tr.Poll(); got.ContextTokens != 1115 || got.Model != "m1" || got.SessionID != "abc" {
 		t.Fatalf("first poll: %+v", got)
 	}
@@ -40,7 +40,7 @@ func TestEventsAreDeduplicated(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "s.jsonl")
 	edit := `{"message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Edit","input":{"file_path":"/a/b/c.go","new_string":"x := 1"}},{"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"/a/b/c.go"}}]}}` + "\n"
 	os.WriteFile(path, []byte(edit+edit), 0o644)
-	got := NewTracker(path).Poll().Events
+	got := NewTracker(path, false).Poll().Events
 	if len(got) != 1 || got[0].Text != "edited b/c.go: x := 1" {
 		t.Fatalf("events: %+v", got)
 	}

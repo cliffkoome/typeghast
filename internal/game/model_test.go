@@ -18,7 +18,7 @@ func newSized(t *testing.T, ctx int) *Model {
 func runFor(m *Model, d time.Duration) {
 	now := time.Now()
 	for t := time.Duration(0); t < d; t += time.Second / fps {
-		m.Update(tickMsg(now.Add(t)))
+		m.Update(tickMsg{m, now.Add(t)})
 	}
 }
 

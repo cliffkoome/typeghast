@@ -1,6 +1,5 @@
-// Package narrator asks a local open-weight model, served by Ollama, to turn
-// the agent's recent actions into short sentences for the player to type.
-// Nothing leaves the machine.
+// Package narrator turns the agent's recent actions into short sentences for
+// the player to type.
 package narrator
 
 import (
@@ -12,21 +11,36 @@ import (
 	"net/http"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/cliffkoome/typeghast/internal/session"
+	"github.com/cliffkoome/typeghast/internal/text"
 )
 
-type Narrator struct {
+// Narrator writes typeable sentences about what the agent did.
+type Narrator interface {
+	// Name is shown in the footer.
+	Name() string
+	// Batches reports whether calls are expensive enough that actions should
+	// be collected before narrating.
+	Batches() bool
+	Narrate(ctx context.Context, events []session.Event) ([]string, error)
+}
+
+// Ollama asks a local open-weight model to write the sentences. Nothing
+// leaves the machine.
+type Ollama struct {
 	URL   string
 	Model string
 	http  *http.Client
 }
 
+func (n *Ollama) Name() string  { return n.Model }
+func (n *Ollama) Batches() bool { return true }
+
 // Detect connects to Ollama and picks a model: the one asked for if it is
 // installed, otherwise a Gemma model, otherwise the first one available.
-func Detect(url, preferred string) (*Narrator, error) {
-	n := &Narrator{URL: strings.TrimRight(url, "/"), http: &http.Client{Timeout: 2 * time.Minute}}
+func Detect(url, preferred string) (*Ollama, error) {
+	n := &Ollama{URL: strings.TrimRight(url, "/"), http: &http.Client{Timeout: 2 * time.Minute}}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, n.URL+"/api/tags", nil)
@@ -85,7 +99,7 @@ Rules:
 Respond with JSON only: {"lines": ["...", "..."]}`
 
 // Narrate summarises events into typeable sentences.
-func (n *Narrator) Narrate(ctx context.Context, events []session.Event) ([]string, error) {
+func (n *Ollama) Narrate(ctx context.Context, events []session.Event) ([]string, error) {
 	var b strings.Builder
 	for _, e := range events {
 		b.WriteString("- ")
@@ -128,7 +142,7 @@ func (n *Narrator) Narrate(ctx context.Context, events []session.Event) ([]strin
 	}
 	var lines []string
 	for _, l := range parsed.Lines {
-		if l = Clean(l); len(strings.Fields(l)) >= 3 {
+		if l = text.Clean(l); len(strings.Fields(l)) >= 3 {
 			lines = append(lines, l)
 		}
 	}
@@ -136,22 +150,4 @@ func (n *Narrator) Narrate(ctx context.Context, events []session.Event) ([]strin
 		return nil, errors.New("model returned no usable lines")
 	}
 	return lines, nil
-}
-
-// Clean reduces a line to characters that are easy to type on any keyboard.
-func Clean(s string) string {
-	repl := strings.NewReplacer("’", "'", "‘", "'", "—", ", ", "–", "-", "“", "", "”", "")
-	s = repl.Replace(s)
-	var b strings.Builder
-	for _, r := range s {
-		switch {
-		case r < unicode.MaxASCII && (unicode.IsLetter(r) || unicode.IsDigit(r)):
-			b.WriteRune(r)
-		case strings.ContainsRune(" ,.-'_/", r):
-			b.WriteRune(r)
-		default:
-			b.WriteRune(' ')
-		}
-	}
-	return strings.Join(strings.Fields(b.String()), " ")
 }
