@@ -1,0 +1,9 @@
+# Binaries
+/typeghast
+/dist/
+*.exe
+
+# Local
+.env
+*.log
+.DS_Store
