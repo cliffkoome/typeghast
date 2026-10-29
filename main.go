@@ -53,8 +53,18 @@ func main() {
 		}
 	}
 
-	if _, err := tea.NewProgram(game.NewApp(cfg), tea.WithAltScreen()).Run(); err != nil {
+	final, err := tea.NewProgram(game.NewApp(cfg), tea.WithAltScreen()).Run()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "typeghast:", err)
 		os.Exit(1)
+	}
+	// The alt screen is gone now, so these stay in the terminal to click.
+	if app, ok := final.(*game.App); ok {
+		if links := app.Links(); len(links) > 0 {
+			fmt.Println("Links you unlocked:")
+			for _, l := range links {
+				fmt.Printf("  %s · %s\n    %s\n", l.Source, l.Text, l.URL)
+			}
+		}
 	}
 }

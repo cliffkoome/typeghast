@@ -20,6 +20,7 @@ const (
 	stGhostRot
 	stGhostRotEye
 	stLabel
+	stLink
 )
 
 var styles = map[styleID]lipgloss.Style{
@@ -33,6 +34,7 @@ var styles = map[styleID]lipgloss.Style{
 	stGhostRot:    lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e36b")),
 	stGhostRotEye: lipgloss.NewStyle().Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#a6e36b")),
 	stLabel:       lipgloss.NewStyle().Foreground(lipgloss.Color("#7f849c")).Italic(true),
+	stLink:        lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")).Underline(true),
 }
 
 type cell struct {
@@ -60,6 +62,16 @@ func (c *canvas) put(x, y int, r rune, st styleID) {
 		return
 	}
 	c.cells[y*c.w+x] = cell{r, st}
+}
+
+// text writes s from (x, y), cut off after maxW cells.
+func (c *canvas) text(x, y, maxW int, s string, st styleID) {
+	for i, r := range []rune(s) {
+		if i >= maxW {
+			return
+		}
+		c.put(x+i, y, r, st)
+	}
 }
 
 func (c *canvas) render() string {

@@ -52,6 +52,8 @@ type App struct {
 
 	news    []feed.Item
 	catalog models.Catalog
+	// links are those unlocked in games already left for the menu.
+	links []feed.Item
 	// waiting is the game to start once loading finishes.
 	waiting *Config
 }
@@ -169,6 +171,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return a, tea.Quit
 			}
 			// Back to the menu; the old game's ticks stop being delivered.
+			a.links = a.Links()
 			a.game = nil
 			a.showModes()
 			return a, nil
@@ -182,6 +185,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, cmd
 	}
 	return a, nil
+}
+
+// Links returns every headline link the player unlocked, oldest first.
+func (a *App) Links() []feed.Item {
+	links := a.links
+	if a.game != nil {
+		links = append(links[:len(links):len(links)], a.game.Unlocked()...)
+	}
+	return links
 }
 
 func (a *App) resume() tea.Cmd {

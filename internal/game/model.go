@@ -57,6 +57,7 @@ const (
 	textLines  = 4
 	demoWindow = 1_000_000
 	agentLabel = "what your agent just did"
+	lockedHint = "type it without a mistake to unlock the link"
 )
 
 // Messages carry the game that scheduled them, so a game left via the menu
@@ -76,9 +77,10 @@ type narrationMsg struct {
 }
 
 // sentence is a line queued for typing, with the label shown while it is
-// being typed.
+// being typed. A url stays locked until the sentence is typed perfectly.
 type sentence struct {
-	text, label string
+	text, label, url string
+	unlocked         bool
 }
 
 type Model struct {
@@ -90,12 +92,18 @@ type Model struct {
 
 	words []string
 	typed [][]rune
-	label []string // per word
+	sent  []int // per word, index into sents
+	sents []sentence
 	// breaks marks words that start a new sentence, which starts a new line.
 	breaks []bool
 	cur    int
 	queue  []sentence
 	news   int // next index into cfg.News
+	// unlocked holds the links earned by typing their headline perfectly.
+	unlocked []feed.Item
+	// browse is the finished headline picked with the arrows, whose link
+	// is shown, or -1 while following the cursor.
+	browse int
 
 	pending     []session.Event
 	narrating   bool
@@ -143,8 +151,8 @@ func New(cfg Config) *Model {
 }
 
 func (m *Model) reset() {
-	m.words, m.typed, m.label, m.breaks = nil, nil, nil, nil
-	m.cur = 0
+	m.words, m.typed, m.sent, m.sents, m.breaks = nil, nil, nil, nil, nil
+	m.cur, m.browse = 0, -1
 	m.started = time.Time{}
 	m.correctChrs, m.keystrokes, m.correctKeys = 0, 0, 0
 	m.score = 0
@@ -257,7 +265,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.narrating, m.lastNarrate, m.narrErr = false, time.Now(), msg.err
 		for _, l := range msg.lines {
-			m.enqueue(sentence{l, agentLabel})
+			m.enqueue(sentence{text: l, label: agentLabel})
 		}
 		return m, m.maybeNarrate()
 
@@ -286,11 +294,29 @@ func (m *Model) handleKey(k tea.KeyMsg) tea.Cmd {
 		if demo {
 			m.setContext(m.threshold() / 20)
 		}
+	case tea.KeyUp:
+		m.browseBy(-1)
+	case tea.KeyDown:
+		m.browseBy(1)
+	case tea.KeyCtrlO:
+		if s, ok := m.shownLink(); ok && s.unlocked {
+			return openURL(s.url)
+		}
+	// Typing goes back to following the cursor.
 	case tea.KeyBackspace:
+		m.browse = -1
 		m.backspace()
 	case tea.KeySpace:
+		m.browse = -1
 		m.space()
+	case tea.KeyEnter:
+		m.browse = -1
+		// Enter finishes a line, so it only works on a sentence's last word.
+		if m.breaks[m.cur+1] {
+			m.space()
+		}
 	case tea.KeyRunes:
+		m.browse = -1
 		for _, r := range k.Runes {
 			if r == ' ' {
 				m.space()
@@ -325,7 +351,64 @@ func (m *Model) space() {
 	}
 	m.cur++
 	m.refill()
+	if m.sent[m.cur] != m.sent[m.cur-1] {
+		m.finishSentence(m.sent[m.cur-1])
+	}
 }
+
+// finishSentence unlocks the sentence's link if every word was typed right.
+func (m *Model) finishSentence(si int) {
+	s := m.sents[si]
+	if s.url == "" {
+		return
+	}
+	for i := m.cur - 1; i >= 0 && m.sent[i] == si; i-- {
+		if string(m.typed[i]) != m.words[i] {
+			return
+		}
+	}
+	m.sents[si].unlocked = true
+	m.unlocked = append(m.unlocked, feed.Item{Text: s.text, Source: s.label, URL: s.url})
+}
+
+// browseBy moves the selection to the previous (-1) or next (+1) finished
+// headline. Moving down past the last one goes back to the cursor.
+func (m *Model) browseBy(dir int) {
+	cur := m.sent[m.cur]
+	si := m.browse
+	if si < 0 {
+		if dir > 0 {
+			return
+		}
+		si = cur
+	}
+	for si += dir; si >= 0 && si < cur; si += dir {
+		if m.sents[si].url != "" {
+			m.browse = si
+			return
+		}
+	}
+	if dir > 0 {
+		m.browse = -1
+	}
+}
+
+// shownLink is the headline whose link sits under the text: the one picked
+// with the arrows, else the latest one unlocked.
+func (m *Model) shownLink() (sentence, bool) {
+	if m.browse >= 0 {
+		return m.sents[m.browse], true
+	}
+	for si := m.sent[m.cur] - 1; si >= 0; si-- {
+		if m.sents[si].unlocked {
+			return m.sents[si], true
+		}
+	}
+	return sentence{}, false
+}
+
+// Unlocked returns the links earned so far, oldest first.
+func (m *Model) Unlocked() []feed.Item { return m.unlocked }
 
 func (m *Model) backspace() {
 	if n := len(m.typed[m.cur]); n > 0 {
@@ -349,13 +432,14 @@ func (m *Model) refill() {
 		s := m.next()
 		// Filler runs on without breaks; real sentences get their own line.
 		prev := ""
-		if n := len(m.label); n > 0 {
-			prev = m.label[n-1]
+		if n := len(m.sents); n > 0 {
+			prev = m.sents[n-1].label
 		}
+		m.sents = append(m.sents, s)
 		for i, w := range strings.Fields(s.text) {
 			m.words = append(m.words, w)
 			m.typed = append(m.typed, nil)
-			m.label = append(m.label, s.label)
+			m.sent = append(m.sent, len(m.sents)-1)
 			m.breaks = append(m.breaks, i == 0 && (s.label != "" || prev != ""))
 		}
 	}
@@ -376,13 +460,9 @@ func (m *Model) next() sentence {
 		}
 		it := news[m.news%len(news)]
 		m.news++
-		label := it.Source
-		if it.URL != "" {
-			label += " · " + it.URL
-		}
-		return sentence{it.Text, label}
+		return sentence{text: it.Text, label: it.Source, url: it.URL}
 	}
-	return sentence{strings.Join(randomWords(m.rng, 10), " "), ""}
+	return sentence{text: strings.Join(randomWords(m.rng, 10), " ")}
 }
 
 const maxQueue = 12
@@ -484,7 +564,7 @@ func (m *Model) drawText(c *canvas) {
 	type span struct{ word, x int }
 	var lines [][]span
 	var line []span
-	x, curLine := 0, 0
+	x, curLine, selLine := 0, 0, -1
 	for i, w := range m.words {
 		n := max(len([]rune(w)), len(m.typed[i]))
 		if x > 0 && (x+n > maxW || m.breaks[i]) {
@@ -494,6 +574,9 @@ func (m *Model) drawText(c *canvas) {
 		if i == m.cur {
 			curLine = len(lines)
 		}
+		if selLine < 0 && m.browse >= 0 && m.sent[i] == m.browse {
+			selLine = len(lines)
+		}
 		line = append(line, span{i, x})
 		x += n + 1
 		if i > m.cur && len(lines) > curLine+textLines {
@@ -502,13 +585,30 @@ func (m *Model) drawText(c *canvas) {
 	}
 	lines = append(lines, line)
 
-	first := max(curLine-1, 0)
+	// Keep the line in focus second from the top, so the one before shows.
+	anchor := curLine
+	if selLine >= 0 {
+		anchor = selLine
+	}
+	first := max(anchor-1, 0)
 	top := (m.ph - (textLines*2 - 1)) / 2
-	if l := m.label[m.cur]; l != "" {
-		for i, r := range []rune(l) {
-			if i < maxW {
-				c.put(textMargin+i, top-2, r, stLabel)
-			}
+	if selLine >= 0 {
+		c.text(textMargin-2, top+(selLine-first)*2, 1, "›", stLink)
+	}
+	s := m.sents[m.sent[m.cur]]
+	label := s.label
+	switch {
+	case m.browse >= 0:
+		label = "picking a headline · type to carry on"
+	case s.url != "":
+		label += " · " + lockedHint
+	}
+	c.text(textMargin, top-2, maxW, label, stLabel)
+	if s, ok := m.shownLink(); ok {
+		if s.unlocked {
+			c.text(textMargin, top+textLines*2, maxW, s.label+" · "+s.url, stLink)
+		} else {
+			c.text(textMargin, top+textLines*2, maxW, s.label+" · locked, it had a typo", stLabel)
 		}
 	}
 	for li := 0; li < textLines && first+li < len(lines); li++ {
@@ -622,6 +722,9 @@ func (m *Model) meter() string {
 
 func (m *Model) footer() string {
 	help := "esc quit · ctrl+r restart"
+	if n := len(m.unlocked); n > 0 {
+		help += fmt.Sprintf(" · ↑↓ pick a headline · ctrl+o open link · %d unlocked, listed when you quit", n)
+	}
 	if m.haunted() && m.cfg.Tracker == nil {
 		help += " · pgup/pgdn context · home compact"
 	}
