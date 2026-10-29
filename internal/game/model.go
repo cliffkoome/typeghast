@@ -2,6 +2,7 @@
 package game
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"math/rand"
@@ -11,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/cliffkoome/typeghast/internal/narrator"
 	"github.com/cliffkoome/typeghast/internal/session"
 )
 
@@ -22,6 +24,12 @@ type Config struct {
 	// Tracker supplies the agent's context usage. Nil means demo mode, where
 	// the player sets the context with pgup/pgdn.
 	Tracker *session.Tracker
+	// Narrator turns the agent's actions into sentences to type. Without one,
+	// commands and edits are typed as short plain lines.
+	Narrator *narrator.Narrator
+	// Initial is the tracker's first snapshot, which holds the session's
+	// history so far.
+	Initial session.Snapshot
 	// Notice is shown under the meter, e.g. why we fell back to demo mode.
 	Notice string
 }
@@ -36,6 +44,10 @@ const (
 
 type tickMsg time.Time
 type pollMsg session.Snapshot
+type narrationMsg struct {
+	lines []string
+	err   error
+}
 
 type Model struct {
 	cfg Config
@@ -47,6 +59,16 @@ type Model struct {
 	words []string
 	typed [][]rune
 	cur   int
+	// fromAgent marks words that came from the agent's actions rather than
+	// the filler pool.
+	fromAgent []bool
+	// queue holds agent sentences not yet added to the word stream.
+	queue []string
+
+	pending     []session.Event
+	narrating   bool
+	lastNarrate time.Time
+	narrErr     error
 
 	ghosts    []*ghost
 	lastSpawn time.Time
@@ -72,23 +94,27 @@ func New(cfg Config) *Model {
 	m.reset()
 	if cfg.Tracker == nil {
 		m.ctxTokens = cfg.Threshold / 4
+	} else {
+		m.ctxTokens = cfg.Initial.ContextTokens
+		m.modelName, m.sessionID = cfg.Initial.Model, cfg.Initial.SessionID
+		m.addEvents(cfg.Initial.Events)
 	}
 	return m
 }
 
 func (m *Model) reset() {
-	m.words = randomWords(m.rng, 120)
-	m.typed = make([][]rune, len(m.words))
+	m.words, m.typed, m.fromAgent = nil, nil, nil
 	m.cur = 0
+	m.refill()
 	m.started = time.Time{}
 	m.correctChrs, m.keystrokes, m.correctKeys = 0, 0, 0
 	m.score = 0
 }
 
 func (m *Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{tick()}
+	cmds := []tea.Cmd{tick(), m.maybeNarrate()}
 	if m.cfg.Tracker != nil {
-		cmds = append(cmds, m.poll(0))
+		cmds = append(cmds, m.poll(time.Second))
 	}
 	return tea.Batch(cmds...)
 }
@@ -160,7 +186,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		snap := session.Snapshot(msg)
 		m.setContext(snap.ContextTokens)
 		m.modelName, m.sessionID = snap.Model, snap.SessionID
-		return m, m.poll(time.Second)
+		m.addEvents(snap.Events)
+		return m, tea.Batch(m.poll(time.Second), m.maybeNarrate())
+
+	case narrationMsg:
+		m.narrating, m.lastNarrate, m.narrErr = false, time.Now(), msg.err
+		m.enqueue(msg.lines...)
+		return m, m.maybeNarrate()
 
 	case tea.KeyMsg:
 		return m, m.handleKey(msg)
@@ -224,10 +256,82 @@ func (m *Model) space() {
 		m.correctChrs += len(m.words[m.cur]) + 1
 	}
 	m.cur++
-	if m.cur > len(m.words)-40 {
-		more := randomWords(m.rng, 80)
-		m.words = append(m.words, more...)
-		m.typed = append(m.typed, make([][]rune, len(more))...)
+	m.refill()
+}
+
+// lookahead is kept short so fresh agent sentences show up within a line.
+const lookahead = 30
+
+func (m *Model) refill() {
+	for len(m.words)-m.cur < lookahead {
+		words, agent := randomWords(m.rng, 10), false
+		if len(m.queue) > 0 {
+			words, agent = strings.Fields(m.queue[0]), true
+			m.queue = m.queue[1:]
+		}
+		for _, w := range words {
+			m.words = append(m.words, w)
+			m.typed = append(m.typed, nil)
+			m.fromAgent = append(m.fromAgent, agent)
+		}
+	}
+}
+
+const maxQueue = 12
+
+func (m *Model) enqueue(lines ...string) {
+	m.queue = append(m.queue, lines...)
+	// Stay current: if the agent outpaces the player, drop the oldest news.
+	if n := len(m.queue); n > maxQueue {
+		m.queue = m.queue[n-maxQueue:]
+	}
+}
+
+func (m *Model) addEvents(events []session.Event) {
+	if m.cfg.Narrator == nil {
+		for _, e := range events {
+			if l := plainLine(e); l != "" {
+				m.enqueue(l)
+			}
+		}
+		return
+	}
+	m.pending = append(m.pending, events...)
+	if n := len(m.pending); n > 30 {
+		m.pending = m.pending[n-30:]
+	}
+}
+
+// plainLine describes an event without a model: commands by their
+// description, file changes by file name.
+func plainLine(e session.Event) string {
+	switch e.Kind {
+	case "command":
+		return narrator.Clean(strings.TrimPrefix(e.Text, "ran a command: "))
+	case "edit", "write":
+		head, _, _ := strings.Cut(e.Text, ":")
+		return narrator.Clean(head)
+	}
+	return ""
+}
+
+// maybeNarrate sends recent actions to the model once enough have piled up,
+// or once some have waited a while.
+func (m *Model) maybeNarrate() tea.Cmd {
+	n := m.cfg.Narrator
+	if n == nil || m.narrating || len(m.pending) == 0 {
+		return nil
+	}
+	if len(m.pending) < 3 && time.Since(m.lastNarrate) < 20*time.Second {
+		return nil
+	}
+	events := m.pending[max(len(m.pending)-12, 0):]
+	m.pending, m.narrating = nil, true
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		lines, err := n.Narrate(ctx, events)
+		return narrationMsg{lines, err}
 	}
 }
 
@@ -323,6 +427,11 @@ func (m *Model) drawText(c *canvas) {
 
 	first := max(curLine-1, 0)
 	top := (m.ph - (textLines*2 - 1)) / 2
+	if m.fromAgent[m.cur] {
+		for i, r := range []rune("what your agent just did") {
+			c.put(textMargin+i, top-2, r, stLabel)
+		}
+	}
 	for li := 0; li < textLines && first+li < len(lines); li++ {
 		y := top + li*2
 		for _, s := range lines[first+li] {
@@ -427,6 +536,16 @@ func (m *Model) footer() string {
 	help := "esc quit · ctrl+r restart"
 	if m.cfg.Tracker == nil {
 		help += " · pgup/pgdn context · home compact"
+	}
+	if n := m.cfg.Narrator; n != nil {
+		status := "narrator " + n.Model
+		switch {
+		case m.narrating:
+			status += " · summarising your agent…"
+		case m.narrErr != nil:
+			status += " · " + m.narrErr.Error()
+		}
+		help += "   " + status
 	}
 	return "\n " + dimStyle.Render(help)
 }

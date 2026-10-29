@@ -17,6 +17,15 @@ type Snapshot struct {
 	SessionID     string
 	Model         string
 	ContextTokens int
+	// Events are the actions read by this poll only, oldest first.
+	Events []Event
+}
+
+// Event is one thing the agent did, described in a line or two of text that
+// a model can summarise.
+type Event struct {
+	Kind string // "edit", "write", "command", "plan", "said"
+	Text string
 }
 
 // Tracker tails a transcript file. With no fixed path it follows whichever
@@ -27,6 +36,7 @@ type Tracker struct {
 	path  string
 	off   int64
 	snap  Snapshot
+	seen  map[string]bool
 }
 
 func NewTracker(path string) *Tracker {
@@ -37,8 +47,10 @@ type entry struct {
 	IsSidechain bool   `json:"isSidechain"`
 	SessionID   string `json:"sessionId"`
 	Message     *struct {
-		Model string `json:"model"`
-		Usage *struct {
+		Role    string          `json:"role"`
+		Model   string          `json:"model"`
+		Content json.RawMessage `json:"content"`
+		Usage   *struct {
 			InputTokens   int `json:"input_tokens"`
 			CacheCreation int `json:"cache_creation_input_tokens"`
 			CacheRead     int `json:"cache_read_input_tokens"`
@@ -60,6 +72,7 @@ func (t *Tracker) Poll() Snapshot {
 	if path != t.path {
 		t.path, t.off = path, 0
 		t.snap = Snapshot{Path: path}
+		t.seen = map[string]bool{}
 	}
 
 	f, err := os.Open(path)
@@ -71,6 +84,7 @@ func (t *Tracker) Poll() Snapshot {
 		return t.snap
 	}
 
+	t.snap.Events = nil
 	r := bufio.NewReaderSize(f, 1<<20)
 	for {
 		line, err := r.ReadBytes('\n')
@@ -81,7 +95,13 @@ func (t *Tracker) Poll() Snapshot {
 		t.off += int64(len(line))
 
 		var e entry
-		if json.Unmarshal(line, &e) != nil || e.IsSidechain || e.Message == nil || e.Message.Usage == nil {
+		if json.Unmarshal(line, &e) != nil || e.IsSidechain || e.Message == nil {
+			continue
+		}
+		if e.Message.Role == "assistant" {
+			t.snap.Events = append(t.snap.Events, parseEvents(e.Message.Content, t.seen)...)
+		}
+		if e.Message.Usage == nil {
 			continue
 		}
 		u := e.Message.Usage

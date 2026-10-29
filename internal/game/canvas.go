@@ -19,6 +19,7 @@ const (
 	stGhostEye
 	stGhostRot
 	stGhostRotEye
+	stLabel
 )
 
 var styles = map[styleID]lipgloss.Style{
@@ -31,6 +32,7 @@ var styles = map[styleID]lipgloss.Style{
 	stGhostEye:    lipgloss.NewStyle().Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#d9d4ff")),
 	stGhostRot:    lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e36b")),
 	stGhostRotEye: lipgloss.NewStyle().Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#a6e36b")),
+	stLabel:       lipgloss.NewStyle().Foreground(lipgloss.Color("#7f849c")).Italic(true),
 }
 
 type cell struct {

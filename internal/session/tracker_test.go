@@ -35,3 +35,13 @@ func TestPollFollowsAppendsAndSkipsSidechains(t *testing.T) {
 		t.Fatalf("after completing line: %+v", got)
 	}
 }
+
+func TestEventsAreDeduplicated(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	edit := `{"message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Edit","input":{"file_path":"/a/b/c.go","new_string":"x := 1"}},{"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"/a/b/c.go"}}]}}` + "\n"
+	os.WriteFile(path, []byte(edit+edit), 0o644)
+	got := NewTracker(path).Poll().Events
+	if len(got) != 1 || got[0].Text != "edited b/c.go: x := 1" {
+		t.Fatalf("events: %+v", got)
+	}
+}
