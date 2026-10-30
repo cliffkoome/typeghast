@@ -44,6 +44,11 @@ var styles = map[styleID]lipgloss.Style{
 	stGhostRotName: lipgloss.NewStyle().Foreground(lipgloss.Color("#7fae52")).Italic(true),
 	stLabel:        lipgloss.NewStyle().Foreground(lipgloss.Color("#7f849c")).Italic(true),
 	stLink:         lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")).Underline(true),
+	stPop:          lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#f9e2af")),
+	stTrailWarm:    lipgloss.NewStyle().Foreground(lipgloss.Color("#f5c542")),
+	stTrailMid:     lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")),
+	stTrailHot:     lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5f6d")),
+	stTrailFade:    lipgloss.NewStyle().Foreground(lipgloss.Color("#585b70")),
 }
 
 type cell struct {

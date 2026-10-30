@@ -63,6 +63,16 @@ const (
 	lockedHint = "type it without a mistake to unlock the link"
 )
 
+// The demo plays out a made-up agent session.
+var (
+	demoLines = []string{
+		"Added retries with backoff to the webhook client so flaky deliveries recover.",
+		"Fixed an off-by-one in the pagination cursor and added a regression test.",
+		"Moved sessions to Redis so a restart no longer logs everyone out.",
+	}
+	demoGhosts = []string{"webhook retries", "pagination test", "redis sessions", "ci logs"}
+)
+
 // Messages carry the game that scheduled them, so a game left via the menu
 // can't feed its timers into the next one.
 type tickMsg struct {
@@ -156,6 +166,11 @@ func New(cfg Config) *Model {
 	case cfg.Mode == Normal:
 	case cfg.Tracker == nil:
 		m.ctxTokens = m.threshold() / 4
+		// Show what a real session looks like.
+		for _, l := range demoLines {
+			m.enqueue(sentence{text: l, label: "demo · " + agentLabel})
+		}
+		m.addNames(demoGhosts)
 	default:
 		m.apply(cfg.Initial)
 	}
@@ -314,7 +329,7 @@ func (m *Model) handleKey(k tea.KeyMsg) tea.Cmd {
 		if demo {
 			m.setContext(max(m.ctxTokens-m.threshold()/10, 0))
 		}
-	case tea.KeyHome:
+	case tea.KeyHome, tea.KeyCtrlL:
 		if demo {
 			m.setContext(m.threshold() / 20)
 		}
@@ -829,7 +844,7 @@ func (m *Model) footer() string {
 		help += fmt.Sprintf(" · ↑↓ pick a headline · ctrl+o open link · %d unlocked, listed when you quit", n)
 	}
 	if m.haunted() && m.cfg.Tracker == nil {
-		help += " · pgup/pgdn context · home compact"
+		help += " · pgup/pgdn context · home or ctrl+l compact"
 	}
 	if m.haunted() && m.cfg.Tracker != nil {
 		status := "narrator: " + m.cfg.Narrator.Name()

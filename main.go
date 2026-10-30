@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"runtime/debug"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -13,9 +14,12 @@ import (
 	"github.com/cliffkoome/typeghast/internal/narrator"
 )
 
+// version is set by release builds.
+var version = "dev"
+
 func main() {
 	mode := flag.String("mode", "", "skip the menu: haunted or normal")
-	demo := flag.Bool("demo", false, "haunted mode without an agent; pgup/pgdn sets the context")
+	demo := flag.Bool("demo", false, "haunted mode without an agent; pgup/pgdn sets the context, home or ctrl+l compacts")
 	sessionPath := flag.String("session", "", "Claude Code transcript (.jsonl) to follow instead of choosing one")
 	threshold := flag.Int("threshold", 0, "context size in tokens at which the haunting peaks (default: --haunt-at of the model's window)")
 	hauntAt := flag.Float64("haunt-at", 0.4, "fraction of the context window at which the haunting peaks")
@@ -24,12 +28,21 @@ func main() {
 	ollama := flag.String("ollama", "http://localhost:11434", "Ollama server URL")
 	noModel := flag.Bool("no-model", false, "don't use a local model; type the agent's own words")
 	noShake := flag.Bool("no-shake", false, "don't shake the screen on streaks, perfect sentences and exorcisms")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("typeghast", currentVersion())
+		return
+	}
 
 	cfg := game.AppConfig{
 		Base:        game.Config{Threshold: *threshold, HauntAt: *hauntAt, MaxGhosts: *maxGhosts, NoShake: *noShake},
 		SessionPath: *sessionPath,
 		Demo:        *demo,
+	}
+	// The demo is a haunted game, so it skips the menu.
+	if *demo && *mode == "" {
+		*mode = "haunted"
 	}
 	switch *mode {
 	case "":
@@ -68,4 +81,15 @@ func main() {
 			}
 		}
 	}
+}
+
+// currentVersion falls back to the module version, which go install records.
+func currentVersion() string {
+	if version != "dev" {
+		return version
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+		return bi.Main.Version
+	}
+	return version
 }

@@ -72,6 +72,7 @@ func TestTypingScoresAndAdvances(t *testing.T) {
 
 func TestNarratorNamesTheGhosts(t *testing.T) {
 	m := newSized(t, 400_000)
+	m.names = nil // forget the demo's names
 	runFor(m, 2*time.Second)
 	m.Update(narrationMsg{m: m, res: narrator.Narration{Ghosts: []string{"flaky test logs", "model.go rewrite"}}})
 	worn := map[string]int{}
@@ -129,5 +130,13 @@ func TestNoShake(t *testing.T) {
 	typeWords(m, streakEvery)
 	if m.shakeOffset(time.Now()) != 0 {
 		t.Fatal("shook with NoShake set")
+	}
+}
+
+func TestEveryStyleIsDefined(t *testing.T) {
+	for st := stUntyped; st <= stTrailFade; st++ {
+		if _, ok := styles[st]; !ok {
+			t.Errorf("style %d has no entry in styles", st)
+		}
 	}
 }
