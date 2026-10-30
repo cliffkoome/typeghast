@@ -89,6 +89,25 @@ func (c Catalog) Lookup(model string) (Info, bool) {
 	return Info{}, false
 }
 
+// Cost prices token counts in USD at the model's API rates. Cache rates
+// fall back to the input rate when the catalog lacks them. ok is false for
+// models the catalog doesn't know.
+func (c Catalog) Cost(model string, input, cacheWrite, cacheRead, output int) (usd float64, ok bool) {
+	info, ok := c.Lookup(model)
+	if !ok {
+		return 0, false
+	}
+	read, write := info.CacheReadCost, info.CacheWriteCost
+	if read == 0 {
+		read = info.InputCost
+	}
+	if write == 0 {
+		write = info.InputCost
+	}
+	return float64(input)*info.InputCost + float64(cacheWrite)*write +
+		float64(cacheRead)*read + float64(output)*info.OutputCost, true
+}
+
 // Window is the model's context window. If the session has already grown
 // past what the catalog says, the agent must be using a larger window (such
 // as Claude's 1M option), so the observed size wins.

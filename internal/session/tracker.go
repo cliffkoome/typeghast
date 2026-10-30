@@ -22,6 +22,18 @@ type Snapshot struct {
 	Updated time.Time
 	// Events are the actions read by this poll only, oldest first.
 	Events []Event
+	// Spent is every token the agent has used since tracking began, by
+	// model, subagents included. It carries across /clear.
+	Spent map[string]Usage
+}
+
+// Usage counts tokens the way the API bills them.
+type Usage struct {
+	Input, CacheWrite, CacheRead, Output int
+}
+
+func (u Usage) add(o Usage) Usage {
+	return Usage{u.Input + o.Input, u.CacheWrite + o.CacheWrite, u.CacheRead + o.CacheRead, u.Output + o.Output}
 }
 
 // Event is one thing the agent did, described in a line or two of text that
@@ -40,10 +52,18 @@ type Tracker struct {
 	off    int64
 	snap   Snapshot
 	seen   map[string]bool
+	// billed holds each API response's usage by message id, because the
+	// transcript repeats a response once per content block.
+	billed map[string]billed
+}
+
+type billed struct {
+	model string
+	usage Usage
 }
 
 func NewTracker(path string, follow bool) *Tracker {
-	return &Tracker{path: path, follow: follow, snap: Snapshot{Path: path}, seen: map[string]bool{}}
+	return &Tracker{path: path, follow: follow, snap: Snapshot{Path: path}, seen: map[string]bool{}, billed: map[string]billed{}}
 }
 
 type entry struct {
@@ -51,6 +71,7 @@ type entry struct {
 	SessionID   string `json:"sessionId"`
 	Cwd         string `json:"cwd"`
 	Message     *struct {
+		ID      string          `json:"id"`
 		Role    string          `json:"role"`
 		Model   string          `json:"model"`
 		Content json.RawMessage `json:"content"`
@@ -97,7 +118,13 @@ func (t *Tracker) Poll() Snapshot {
 		t.off += int64(len(line))
 
 		var e entry
-		if json.Unmarshal(line, &e) != nil || e.IsSidechain || e.Message == nil {
+		if json.Unmarshal(line, &e) != nil || e.Message == nil {
+			continue
+		}
+		if u := e.Message.Usage; u != nil && e.Message.ID != "" {
+			t.billed[e.Message.ID] = billed{e.Message.Model, Usage{u.InputTokens, u.CacheCreation, u.CacheRead, u.OutputTokens}}
+		}
+		if e.IsSidechain {
 			continue
 		}
 		if e.Message.Role == "assistant" {
@@ -114,6 +141,10 @@ func (t *Tracker) Poll() Snapshot {
 		if e.SessionID != "" {
 			t.snap.SessionID = e.SessionID
 		}
+	}
+	t.snap.Spent = map[string]Usage{}
+	for _, b := range t.billed {
+		t.snap.Spent[b.model] = t.snap.Spent[b.model].add(b.usage)
 	}
 	return t.snap
 }

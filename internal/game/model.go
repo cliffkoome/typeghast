@@ -121,6 +121,9 @@ type Model struct {
 
 	ctxTokens int
 	window    int
+	// cost is what the session's tokens would cost at API prices, or -1
+	// if no model it used has a known price.
+	cost      float64
 	modelName string
 	sessionID string
 	updated   time.Time
@@ -187,6 +190,12 @@ func (m *Model) apply(snap session.Snapshot) {
 	m.modelName, m.sessionID, m.updated = snap.Model, snap.SessionID, snap.Updated
 	m.window = m.cfg.Catalog.Window(snap.Model, snap.ContextTokens)
 	m.addEvents(snap.Events)
+	m.cost = -1
+	for model, u := range snap.Spent {
+		if usd, ok := m.cfg.Catalog.Cost(model, u.Input, u.CacheWrite, u.CacheRead, u.Output); ok {
+			m.cost = max(m.cost, 0) + usd
+		}
+	}
 }
 
 func (m *Model) threshold() int {
@@ -717,6 +726,10 @@ func (m *Model) header() string {
 	stats := fmt.Sprintf("wpm %3.0f   acc %3.0f%%", wpm, acc)
 	if m.haunted() {
 		stats += fmt.Sprintf("   score %6.0f   ×%.1f", m.score, m.multiplier())
+	}
+	if m.haunted() && m.cfg.Tracker != nil && m.cost >= 0 {
+		// Subscribers don't pay per token, so this is what the API would charge.
+		stats += fmt.Sprintf("   🎃 $%.2f API-equivalent", m.cost)
 	}
 	stats = statStyle.Render(stats)
 	title := titleStyle.Render("typeghast")

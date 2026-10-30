@@ -45,3 +45,15 @@ func TestEventsAreDeduplicated(t *testing.T) {
 		t.Fatalf("events: %+v", got)
 	}
 }
+
+func TestSpendCountsEachResponseOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	main := `{"message":{"id":"m1","model":"opus","usage":{"input_tokens":10,"cache_read_input_tokens":1000,"cache_creation_input_tokens":100,"output_tokens":5}}}` + "\n"
+	sub := `{"isSidechain":true,"message":{"id":"s1","model":"haiku","usage":{"input_tokens":7,"output_tokens":3}}}` + "\n"
+	// The transcript repeats a response once per content block.
+	os.WriteFile(path, []byte(main+main+sub), 0o644)
+	got := NewTracker(path, false).Poll().Spent
+	if got["opus"] != (Usage{10, 100, 1000, 5}) || got["haiku"] != (Usage{Input: 7, Output: 3}) {
+		t.Fatalf("spent: %+v", got)
+	}
+}
