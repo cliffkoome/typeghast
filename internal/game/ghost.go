@@ -30,6 +30,8 @@ type ghost struct {
 	// Hunters drift toward the word you're typing instead of wandering.
 	hunter  bool
 	leaving bool
+	// name is what the ghost stands for in the agent's context, if known.
+	name string
 }
 
 func spawnGhost(rng *rand.Rand, pw, ph int, hunter bool) *ghost {
@@ -88,9 +90,9 @@ func (g *ghost) offscreen(pw, ph int) bool {
 }
 
 func (g *ghost) draw(c *canvas, rotten bool) {
-	body, eye := stGhost, stGhostEye
+	body, eye, label := stGhost, stGhostEye, stGhostName
 	if rotten {
-		body, eye = stGhostRot, stGhostRotEye
+		body, eye, label = stGhostRot, stGhostRotEye, stGhostRotName
 	}
 	frame := ghostFrames[int(g.phase/math.Pi)%2]
 	ox := int(math.Round(g.x))
@@ -105,5 +107,14 @@ func (g *ghost) draw(c *canvas, rotten bool) {
 				c.put(ox+dx, oy+dy, r, body)
 			}
 		}
+	}
+	if g.name != "" {
+		// The name floats above the ghost, or below it at the top edge.
+		ly := oy - 1
+		if ly < 0 {
+			ly = oy + ghostH
+		}
+		n := []rune(g.name)
+		c.text(ox+(ghostW-len(n))/2, ly, len(n), g.name, label)
 	}
 }

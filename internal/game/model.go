@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"slices"
 	"strings"
 	"time"
 
@@ -71,9 +72,9 @@ type pollMsg struct {
 	snap session.Snapshot
 }
 type narrationMsg struct {
-	m     *Model
-	lines []string
-	err   error
+	m   *Model
+	res narrator.Narration
+	err error
 }
 
 // sentence is a line queued for typing, with the label shown while it is
@@ -112,8 +113,11 @@ type Model struct {
 
 	ghosts    []*ghost
 	lastSpawn time.Time
-	cursorX   float64
-	cursorY   float64
+	// names are what the narrator says is haunting the context, newest
+	// last. Ghosts wear them.
+	names   []string
+	cursorX float64
+	cursorY float64
 
 	ctxTokens int
 	window    int
@@ -223,6 +227,8 @@ func (m *Model) setContext(n int) {
 
 func (m *Model) exorcise() {
 	m.exorcisedAt = time.Now()
+	// The context they stood for is gone, so new ghosts start nameless.
+	m.names = nil
 	cx, cy := float64(m.pw)/2, float64(m.ph)/2
 	for _, g := range m.ghosts {
 		g.leaving = true
@@ -264,9 +270,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.narrating, m.lastNarrate, m.narrErr = false, time.Now(), msg.err
-		for _, l := range msg.lines {
+		for _, l := range msg.res.Lines {
 			m.enqueue(sentence{text: l, label: agentLabel})
 		}
+		m.addNames(msg.res.Ghosts)
 		return m, m.maybeNarrate()
 
 	case tea.KeyMsg:
@@ -501,9 +508,48 @@ func (m *Model) maybeNarrate() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		lines, err := n.Narrate(ctx, events)
-		return narrationMsg{m, lines, err}
+		res, err := n.Narrate(ctx, events)
+		return narrationMsg{m, res, err}
 	}
+}
+
+// maxNames is how many ghost names are remembered; older ones fade out.
+const maxNames = 8
+
+// addNames remembers new ghost names and hands them to unnamed ghosts.
+func (m *Model) addNames(names []string) {
+	for _, n := range names {
+		m.names = slices.DeleteFunc(m.names, func(o string) bool { return o == n })
+		m.names = append(m.names, n)
+	}
+	if len(m.names) > maxNames {
+		m.names = m.names[len(m.names)-maxNames:]
+	}
+	for _, g := range m.ghosts {
+		if g.name == "" && !g.leaving {
+			g.name = m.freeName()
+		}
+	}
+}
+
+// freeName picks the newest name no active ghost wears yet, or a random one
+// if every name is taken.
+func (m *Model) freeName() string {
+	if len(m.names) == 0 {
+		return ""
+	}
+	worn := map[string]bool{}
+	for _, g := range m.ghosts {
+		if !g.leaving {
+			worn[g.name] = true
+		}
+	}
+	for i := len(m.names) - 1; i >= 0; i-- {
+		if !worn[m.names[i]] {
+			return m.names[i]
+		}
+	}
+	return m.names[m.rng.Intn(len(m.names))]
 }
 
 func (m *Model) stepGhosts(now time.Time, dt float64) {
@@ -531,7 +577,9 @@ func (m *Model) stepGhosts(now time.Time, dt float64) {
 	target := m.targetGhosts()
 	if active < target && now.Sub(m.lastSpawn) > 300*time.Millisecond {
 		hunter := m.rng.Float64() < 0.2+0.3*m.ratio()
-		m.ghosts = append(m.ghosts, spawnGhost(m.rng, m.pw, m.ph, hunter))
+		g := spawnGhost(m.rng, m.pw, m.ph, hunter)
+		g.name = m.freeName()
+		m.ghosts = append(m.ghosts, g)
 		m.lastSpawn = now
 	}
 	if active > target {

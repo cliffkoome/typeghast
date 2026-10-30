@@ -1,10 +1,13 @@
 package game
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/cliffkoome/typeghast/internal/narrator"
 )
 
 func newSized(t *testing.T, ctx int) *Model {
@@ -64,5 +67,29 @@ func TestTypingScoresAndAdvances(t *testing.T) {
 	}
 	if m.View() == "" {
 		t.Fatal("empty view")
+	}
+}
+
+func TestNarratorNamesTheGhosts(t *testing.T) {
+	m := newSized(t, 400_000)
+	runFor(m, 2*time.Second)
+	m.Update(narrationMsg{m: m, res: narrator.Narration{Ghosts: []string{"flaky test logs", "model.go rewrite"}}})
+	worn := map[string]int{}
+	for _, g := range m.ghosts {
+		if g.name == "" {
+			t.Fatal("a ghost was left nameless")
+		}
+		worn[g.name]++
+	}
+	if worn["flaky test logs"] == 0 || worn["model.go rewrite"] == 0 {
+		t.Fatalf("names not shared out: %v", worn)
+	}
+	if !strings.Contains(m.View(), "model.go rewrite") {
+		t.Fatal("name not drawn")
+	}
+
+	m.setContext(30_000)
+	if len(m.names) != 0 {
+		t.Fatalf("names survived the exorcism: %q", m.names)
 	}
 }

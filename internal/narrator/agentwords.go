@@ -2,6 +2,8 @@ package narrator
 
 import (
 	"context"
+	"path"
+	"slices"
 	"strings"
 
 	"github.com/cliffkoome/typeghast/internal/session"
@@ -15,14 +17,23 @@ type AgentWords struct{}
 func (AgentWords) Name() string  { return "agent's own words" }
 func (AgentWords) Batches() bool { return false }
 
-func (AgentWords) Narrate(_ context.Context, events []session.Event) ([]string, error) {
-	var lines []string
+// Narrate also names ghosts after the files the agent touched, since those
+// are what fill its context.
+func (AgentWords) Narrate(_ context.Context, events []session.Event) (Narration, error) {
+	var res Narration
 	for _, e := range events {
 		if l := plain(e); len(strings.Fields(l)) >= 2 {
-			lines = append(lines, l)
+			res.Lines = append(res.Lines, l)
+		}
+		if e.Kind == "edit" || e.Kind == "write" {
+			head, _, _ := strings.Cut(e.Text, ":")
+			_, file, _ := strings.Cut(head, " ")
+			if g := ghostName(path.Base(file)); g != "" && !slices.Contains(res.Ghosts, g) {
+				res.Ghosts = append(res.Ghosts, g)
+			}
 		}
 	}
-	return lines, nil
+	return res, nil
 }
 
 func plain(e session.Event) string {

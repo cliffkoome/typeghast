@@ -23,8 +23,20 @@ type Narrator interface {
 	// Batches reports whether calls are expensive enough that actions should
 	// be collected before narrating.
 	Batches() bool
-	Narrate(ctx context.Context, events []session.Event) ([]string, error)
+	Narrate(ctx context.Context, events []session.Event) (Narration, error)
 }
+
+// Narration is what a narrator makes of a batch of actions.
+type Narration struct {
+	// Lines are the sentences to type.
+	Lines []string
+	// Ghosts name what is piling up in the agent's context. The game puts
+	// them on the ghosts.
+	Ghosts []string
+}
+
+// maxGhostName keeps a name short enough to float above a ghost.
+const maxGhostName = 18
 
 // Ollama asks a local open-weight model to write the sentences. Nothing
 // leaves the machine.
@@ -96,10 +108,12 @@ Rules:
 - You may name files, functions and tools.
 - No markdown, quotes, emoji or lists.
 
-Respond with JSON only: {"lines": ["...", "..."]}`
+Also name 1 to 3 ghosts. Each ghost is something now haunting the agent's context window: a file it keeps editing, a long log, a failing test, a plan it carries around. Names are 1 to 3 lowercase words, at most 18 characters, like "model.go rewrite", "flaky test logs" or "old todo list".
+
+Respond with JSON only: {"lines": ["...", "..."], "ghosts": ["...", "..."]}`
 
 // Narrate summarises events into typeable sentences.
-func (n *Ollama) Narrate(ctx context.Context, events []session.Event) ([]string, error) {
+func (n *Ollama) Narrate(ctx context.Context, events []session.Event) (Narration, error) {
 	var b strings.Builder
 	for _, e := range events {
 		b.WriteString("- ")
@@ -118,36 +132,52 @@ func (n *Ollama) Narrate(ctx context.Context, events []session.Event) ([]string,
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.URL+"/api/chat", bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return Narration{}, err
 	}
 	resp, err := n.http.Do(req)
 	if err != nil {
-		return nil, err
+		return Narration{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("ollama: %s", resp.Status)
+		return Narration{}, fmt.Errorf("ollama: %s", resp.Status)
 	}
 	var out struct {
 		Message struct{ Content string } `json:"message"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
+		return Narration{}, err
 	}
 	var parsed struct {
-		Lines []string `json:"lines"`
+		Lines  []string `json:"lines"`
+		Ghosts []string `json:"ghosts"`
 	}
 	if err := json.Unmarshal([]byte(out.Message.Content), &parsed); err != nil {
-		return nil, fmt.Errorf("model returned invalid JSON: %w", err)
+		return Narration{}, fmt.Errorf("model returned invalid JSON: %w", err)
 	}
-	var lines []string
+	var res Narration
 	for _, l := range parsed.Lines {
 		if l = text.Clean(l); len(strings.Fields(l)) >= 3 {
-			lines = append(lines, l)
+			res.Lines = append(res.Lines, l)
 		}
 	}
-	if len(lines) == 0 {
-		return nil, errors.New("model returned no usable lines")
+	if len(res.Lines) == 0 {
+		return Narration{}, errors.New("model returned no usable lines")
 	}
-	return lines, nil
+	for _, g := range parsed.Ghosts {
+		if g = ghostName(g); g != "" {
+			res.Ghosts = append(res.Ghosts, g)
+		}
+	}
+	return res, nil
+}
+
+// ghostName tidies a name for display, or returns "" if nothing usable is
+// left.
+func ghostName(s string) string {
+	s = strings.ToLower(strings.Trim(text.Clean(s), ". "))
+	if r := []rune(s); len(r) > maxGhostName {
+		s = strings.TrimSpace(string(r[:maxGhostName]))
+	}
+	return s
 }

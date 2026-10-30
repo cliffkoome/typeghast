@@ -19,22 +19,26 @@ const (
 	stGhostEye
 	stGhostRot
 	stGhostRotEye
+	stGhostName
+	stGhostRotName
 	stLabel
 	stLink
 )
 
 var styles = map[styleID]lipgloss.Style{
-	stUntyped:     lipgloss.NewStyle().Foreground(lipgloss.Color("#6c6f85")),
-	stCorrect:     lipgloss.NewStyle().Foreground(lipgloss.Color("#e6e6f0")),
-	stWrong:       lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5f6d")),
-	stMissed:      lipgloss.NewStyle().Foreground(lipgloss.Color("#a1404a")).Underline(true),
-	stCursor:      lipgloss.NewStyle().Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#f5c542")),
-	stGhost:       lipgloss.NewStyle().Foreground(lipgloss.Color("#d9d4ff")),
-	stGhostEye:    lipgloss.NewStyle().Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#d9d4ff")),
-	stGhostRot:    lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e36b")),
-	stGhostRotEye: lipgloss.NewStyle().Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#a6e36b")),
-	stLabel:       lipgloss.NewStyle().Foreground(lipgloss.Color("#7f849c")).Italic(true),
-	stLink:        lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")).Underline(true),
+	stUntyped:      lipgloss.NewStyle().Foreground(lipgloss.Color("#6c6f85")),
+	stCorrect:      lipgloss.NewStyle().Foreground(lipgloss.Color("#e6e6f0")),
+	stWrong:        lipgloss.NewStyle().Foreground(lipgloss.Color("#ff5f6d")),
+	stMissed:       lipgloss.NewStyle().Foreground(lipgloss.Color("#a1404a")).Underline(true),
+	stCursor:       lipgloss.NewStyle().Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#f5c542")),
+	stGhost:        lipgloss.NewStyle().Foreground(lipgloss.Color("#d9d4ff")),
+	stGhostEye:     lipgloss.NewStyle().Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#d9d4ff")),
+	stGhostRot:     lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e36b")),
+	stGhostRotEye:  lipgloss.NewStyle().Foreground(lipgloss.Color("#1e1e2e")).Background(lipgloss.Color("#a6e36b")),
+	stGhostName:    lipgloss.NewStyle().Foreground(lipgloss.Color("#9a94c9")).Italic(true),
+	stGhostRotName: lipgloss.NewStyle().Foreground(lipgloss.Color("#7fae52")).Italic(true),
+	stLabel:        lipgloss.NewStyle().Foreground(lipgloss.Color("#7f849c")).Italic(true),
+	stLink:         lipgloss.NewStyle().Foreground(lipgloss.Color("#a6e3a1")).Underline(true),
 }
 
 type cell struct {
