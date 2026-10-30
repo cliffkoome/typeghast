@@ -34,3 +34,16 @@ func TestAgentWords(t *testing.T) {
 		t.Errorf("ghosts = %q, want [model.go]", res.Ghosts)
 	}
 }
+
+func TestGhostNameCutsAtWords(t *testing.T) {
+	for in, want := range map[string]string{
+		"Usage Transcript Logs.":             "usage transcript",
+		"model.go":                           "model.go",
+		"supercalifragilisticexpialidocious": "supercalifragilist",
+		"   ":                                "",
+	} {
+		if got := ghostName(in); got != want {
+			t.Errorf("ghostName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

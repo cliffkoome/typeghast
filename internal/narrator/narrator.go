@@ -108,7 +108,7 @@ Rules:
 - You may name files, functions and tools.
 - No markdown, quotes, emoji or lists.
 
-Also name 1 to 3 ghosts. Each ghost is something now haunting the agent's context window: a file it keeps editing, a long log, a failing test, a plan it carries around. Names are 1 to 3 lowercase words, at most 18 characters, like "model.go rewrite", "flaky test logs" or "old todo list".
+Also name 1 to 3 ghosts. Each ghost is something from these actions that now fills the agent's context window: a file it keeps editing, a long command output, a failing test, a plan it carries around. Take each name from the actions above, never invent one. Names are 1 to 3 lowercase words, at most 18 characters.
 
 Respond with JSON only: {"lines": ["...", "..."], "ghosts": ["...", "..."]}`
 
@@ -124,6 +124,11 @@ func (n *Ollama) Narrate(ctx context.Context, events []session.Event) (Narration
 		"model":  n.Model,
 		"stream": false,
 		"format": "json",
+		// Thinking models like Gemma 4 otherwise reason for minutes before
+		// answering, and sometimes run out before writing the JSON.
+		"think": false,
+		// Narration comes in bursts; don't reload the model between them.
+		"keep_alive": "30m",
 		"messages": []map[string]string{
 			{"role": "system", "content": systemPrompt},
 			{"role": "user", "content": "Recent actions, oldest first:\n" + b.String()},
@@ -175,9 +180,14 @@ func (n *Ollama) Narrate(ctx context.Context, events []session.Event) (Narration
 // ghostName tidies a name for display, or returns "" if nothing usable is
 // left.
 func ghostName(s string) string {
-	s = strings.ToLower(strings.Trim(text.Clean(s), ". "))
+	words := strings.Fields(strings.ToLower(strings.Trim(text.Clean(s), ". ")))
+	// Drop whole words until it fits, but keep at least the first.
+	for len(words) > 1 && len(strings.Join(words, " ")) > maxGhostName {
+		words = words[:len(words)-1]
+	}
+	s = strings.Join(words, " ")
 	if r := []rune(s); len(r) > maxGhostName {
-		s = strings.TrimSpace(string(r[:maxGhostName]))
+		s = string(r[:maxGhostName])
 	}
 	return s
 }
