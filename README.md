@@ -2,6 +2,10 @@
 
 A terminal typing game haunted by your coding agent's context window.
 
+📖 [Read the story behind it on DEV](https://dev.to/megalodon/typeghast-a-typing-game-haunted-by-your-coding-agents-context-window-5hkn):
+how it reads the agent's context, and how Gemma 4 went from 90 seconds per
+batch to a few seconds.
+
 ![typeghast: typing what the agent just did while ghosts named after its context swarm the text, until a compact exorcises them](assets/demo.gif)
 
 You kick off a coding agent, then wait. typeghast gives you something to do
