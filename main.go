@@ -23,10 +23,11 @@ func main() {
 	model := flag.String("model", "", "Ollama model that narrates the agent's work (default: a Gemma model if installed, else any)")
 	ollama := flag.String("ollama", "http://localhost:11434", "Ollama server URL")
 	noModel := flag.Bool("no-model", false, "don't use a local model; type the agent's own words")
+	noShake := flag.Bool("no-shake", false, "don't shake the screen on streaks, perfect sentences and exorcisms")
 	flag.Parse()
 
 	cfg := game.AppConfig{
-		Base:        game.Config{Threshold: *threshold, HauntAt: *hauntAt, MaxGhosts: *maxGhosts},
+		Base:        game.Config{Threshold: *threshold, HauntAt: *hauntAt, MaxGhosts: *maxGhosts, NoShake: *noShake},
 		SessionPath: *sessionPath,
 		Demo:        *demo,
 	}

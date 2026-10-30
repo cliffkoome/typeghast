@@ -23,6 +23,11 @@ const (
 	stGhostRotName
 	stLabel
 	stLink
+	stPop
+	stTrailWarm
+	stTrailMid
+	stTrailHot
+	stTrailFade
 )
 
 var styles = map[styleID]lipgloss.Style{
@@ -51,6 +56,8 @@ type cell struct {
 type canvas struct {
 	w, h  int
 	cells []cell
+	// dx shifts everything drawn sideways, to shake the play area.
+	dx int
 }
 
 func newCanvas(w, h int) *canvas {
@@ -62,6 +69,7 @@ func newCanvas(w, h int) *canvas {
 }
 
 func (c *canvas) put(x, y int, r rune, st styleID) {
+	x += c.dx
 	if x < 0 || y < 0 || x >= c.w || y >= c.h {
 		return
 	}

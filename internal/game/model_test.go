@@ -93,3 +93,41 @@ func TestNarratorNamesTheGhosts(t *testing.T) {
 		t.Fatalf("names survived the exorcism: %q", m.names)
 	}
 }
+
+func typeWords(m *Model, n int) {
+	for i := 0; i < n; i++ {
+		m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(m.words[m.cur] + " ")})
+	}
+}
+
+func TestStreakPopsShakesAndTrails(t *testing.T) {
+	m := newSized(t, 0)
+	typeWords(m, streakEvery)
+	if m.fx.streak != streakEvery || !m.popping(m.cur-1) {
+		t.Fatalf("streak=%d popping=%v", m.fx.streak, m.popping(m.cur-1))
+	}
+	if time.Since(m.fx.shakeAt) > time.Second || !strings.Contains(m.header(), "25-word streak") {
+		t.Fatal("no shake or banner at the streak")
+	}
+	// Twenty-five words in an instant is very fast, so speed lines show.
+	if !strings.Contains(m.View(), "━") {
+		t.Fatal("no speed trail")
+	}
+	if m.burstWPM(time.Now().Add(burstWindow+time.Millisecond)) != 0 {
+		t.Fatal("trail speed didn't fade")
+	}
+
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x ")})
+	if m.fx.streak != 0 {
+		t.Fatal("a wrong word didn't break the streak")
+	}
+}
+
+func TestNoShake(t *testing.T) {
+	m := New(Config{Threshold: 400_000, MaxGhosts: 14, NoShake: true})
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	typeWords(m, streakEvery)
+	if m.shakeOffset(time.Now()) != 0 {
+		t.Fatal("shook with NoShake set")
+	}
+}

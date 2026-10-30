@@ -48,6 +48,8 @@ type Config struct {
 	News []feed.Item
 	// Notice is shown under the meter, e.g. why we fell back to demo mode.
 	Notice string
+	// NoShake keeps the play area still on big moments.
+	NoShake bool
 }
 
 const (
@@ -129,6 +131,10 @@ type Model struct {
 	updated   time.Time
 
 	exorcisedAt time.Time
+	fx          juice
+	// typedCells are the on-screen cells typed so far, in order, for the
+	// speed trail.
+	typedCells []point
 
 	started     time.Time
 	correctChrs int
@@ -160,6 +166,7 @@ func New(cfg Config) *Model {
 func (m *Model) reset() {
 	m.words, m.typed, m.sent, m.sents, m.breaks = nil, nil, nil, nil, nil
 	m.cur, m.browse = 0, -1
+	m.fx = juice{}
 	m.started = time.Time{}
 	m.correctChrs, m.keystrokes, m.correctKeys = 0, 0, 0
 	m.score = 0
@@ -236,6 +243,7 @@ func (m *Model) setContext(n int) {
 
 func (m *Model) exorcise() {
 	m.exorcisedAt = time.Now()
+	m.shake(2)
 	// The context they stood for is gone, so new ghosts start nameless.
 	m.names = nil
 	cx, cy := float64(m.pw)/2, float64(m.ph)/2
@@ -355,6 +363,7 @@ func (m *Model) typeRune(r rune) {
 	if i < len(word) && word[i] == r {
 		m.correctKeys++
 		m.score += m.multiplier()
+		m.fx.keys = append(m.fx.keys, time.Now())
 	}
 }
 
@@ -364,6 +373,13 @@ func (m *Model) space() {
 	}
 	if string(m.typed[m.cur]) == m.words[m.cur] {
 		m.correctChrs += len(m.words[m.cur]) + 1
+		m.pop(m.cur, m.cur)
+		if m.fx.streak++; m.fx.streak%streakEvery == 0 {
+			m.shake(1)
+			m.announce(fmt.Sprintf("🔥 %d-word streak", m.fx.streak))
+		}
+	} else {
+		m.fx.streak = 0
 	}
 	m.cur++
 	m.refill()
@@ -372,17 +388,29 @@ func (m *Model) space() {
 	}
 }
 
-// finishSentence unlocks the sentence's link if every word was typed right.
+// finishSentence rewards a sentence typed without a wrong word: it flashes,
+// the screen shakes, and a headline's link unlocks. Filler words don't count,
+// since nothing shows where their sentences end.
 func (m *Model) finishSentence(si int) {
 	s := m.sents[si]
-	if s.url == "" {
+	if s.label == "" {
 		return
 	}
-	for i := m.cur - 1; i >= 0 && m.sent[i] == si; i-- {
+	start := m.cur
+	for start > 0 && m.sent[start-1] == si {
+		start--
+	}
+	for i := start; i < m.cur; i++ {
 		if string(m.typed[i]) != m.words[i] {
 			return
 		}
 	}
+	m.pop(start, m.cur-1)
+	if s.url == "" {
+		m.shake(1)
+		return
+	}
+	m.shake(2)
 	m.sents[si].unlocked = true
 	m.unlocked = append(m.unlocked, feed.Item{Text: s.text, Source: s.label, URL: s.url})
 }
@@ -605,8 +633,11 @@ func (m *Model) View() string {
 	if m.w == 0 {
 		return ""
 	}
+	now := time.Now()
 	c := newCanvas(m.pw, m.ph)
+	c.dx = m.shakeOffset(now)
 	m.drawText(c)
+	m.drawTrail(c, now)
 	rotten := m.ratio() >= 0.75
 	for _, g := range m.ghosts {
 		g.draw(c, rotten)
@@ -668,6 +699,7 @@ func (m *Model) drawText(c *canvas) {
 			c.text(textMargin, top+textLines*2, maxW, s.label+" · locked, it had a typo", stLabel)
 		}
 	}
+	m.typedCells = m.typedCells[:0]
 	for li := 0; li < textLines && first+li < len(lines); li++ {
 		y := top + li*2
 		for _, s := range lines[first+li] {
@@ -686,6 +718,8 @@ func (m *Model) drawWord(c *canvas, i, x, y int) {
 			r, st = word[j], stCorrect
 			if typed[j] != word[j] {
 				st = stWrong
+			} else if m.popping(i) {
+				st = stPop
 			}
 		case j < len(typed):
 			r, st = typed[j], stWrong // extra letters past the word
@@ -699,6 +733,12 @@ func (m *Model) drawWord(c *canvas, i, x, y int) {
 			m.cursorX, m.cursorY = float64(x+j), float64(y)
 		}
 		c.put(x+j, y, r, st)
+		if i < m.cur || j < len(typed) {
+			m.typedCells = append(m.typedCells, point{x + j, y})
+		}
+	}
+	if i < m.cur {
+		m.typedCells = append(m.typedCells, point{x + max(len(word), len(typed)), y})
 	}
 	if i == m.cur && len(typed) >= len(word) {
 		c.put(x+len(typed), y, ' ', stCursor)
@@ -723,7 +763,7 @@ func (m *Model) header() string {
 	if m.keystrokes > 0 {
 		acc = float64(m.correctKeys) / float64(m.keystrokes) * 100
 	}
-	stats := fmt.Sprintf("wpm %3.0f   acc %3.0f%%", wpm, acc)
+	stats := fmt.Sprintf("wpm %3.0f   acc %3.0f%%   streak %3d", wpm, acc, m.fx.streak)
 	if m.haunted() {
 		stats += fmt.Sprintf("   score %6.0f   ×%.1f", m.score, m.multiplier())
 	}
@@ -745,6 +785,8 @@ func (m *Model) header() string {
 	switch {
 	case time.Since(m.exorcisedAt) < 2*time.Second:
 		row3 = " " + bannerStyle.Render("✝ EXORCISED — context cleared, the ghosts flee ✝")
+	case time.Since(m.fx.bannerAt) < bannerDur:
+		row3 = " " + bannerStyle.Render(m.fx.banner)
 	case m.cfg.Notice != "":
 		row3 = " " + dimStyle.Render(m.cfg.Notice)
 	}
